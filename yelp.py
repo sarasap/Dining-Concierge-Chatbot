@@ -99,7 +99,7 @@ def put_data_to_open_search(response_restaurants, esClient):
 
 
 if __name__=='__main__':
-    api_key = 'vD_ccrkE78_o1vuML2JY6G9X3zn3Fw6QpOHkbvb0Jjo2wEeMMq3lHRGaUO6hotP-cirmc3ePeeISo9kd7LDBoU31QkTI5XqRV8uxPTGMHf0QkGYz92r4THQ6YJANZ3Yx'
+    api_key = ''
     api='https://api.yelp.com/v3/businesses/search'
     service='es'
     credentials = boto3.Session(region_name='us-east-1', aws_access_key_id='', aws_secret_access_key='').get_credentials()
