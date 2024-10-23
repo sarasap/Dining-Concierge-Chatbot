@@ -6,13 +6,18 @@ import json
 from botocore.exceptions import ClientError
 from elasticsearch import Elasticsearch, RequestsHttpConnection
 from requests_aws4auth import AWS4Auth
+from base64 import b64encode
+import urllib3
+import requests
+import random
+
 
 # Set up logging
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 
 opensearch_endpoint = 'https://search-diningopensearch-ct3nznfv55eeyexbdclrio5poq.us-east-1.es.amazonaws.com' 
-opensearch_username = ''
+opensearch_username = 'sarasa'
 opensearch_password = ''
 
 # Function to fetch data from SQS
@@ -43,51 +48,58 @@ def get_sqs_data(queue_URL):
         return []
 
 # Elasticsearch search function
-def es_search(host, query):
-    es_query = {
-        "query": {
-            "match": {
-                "Cuisine": {
+def es_search(es_host,cuisine):
+    query = {
+            "size": 100,
+            "query": {
+                "multi_match": {
                     "query": cuisine,
-                    "operator": "or"
-                }
+                    "fields": ["cuisine"]
+                                }
+                     }
             }
-        }
-    }
-
-    auth_header = b64encode(f"{opensearch_username}:{opensearch_password}".encode()).decode('utf-8')
-    headers = {
-        'Authorization': f'Basic {auth_header}',
-        'Content-Type': 'application/json'
-    }
-
-    es_response = http.request(
-        'POST',
-        f"{opensearch_endpoint}/_search",
-        body=json.dumps(es_query),
-        headers=headers
-    )
+        
+    index = 'restaurant'
+    url = 'https://' + es_host + '/' + index + '/_search'
+    awsauth = (opensearch_username,opensearch_password)
+    headers = { "Content-Type": "application/json" }
+    response = requests.post(url,auth=awsauth, headers=headers, data=json.dumps(query))
+    print("response")
+    print(response)
+    res = response.json()
+    print(res)
+    noOfHits = res['hits']['total']
+    hits = res['hits']['hits']
+    buisinessIds = []
     
-    if es_response.status != 200:
-        raise Exception(f"Error: Received status code {es_response.status} from OpenSearch")
-
-    data = json.loads(es_response.data.decode('utf-8'))
-    es_data = data["hits"]["hits"]
-
-    restaurant_ids = [restaurant["_source"]["RestaurantID"] for restaurant in es_data]
-
-    return random.sample(restaurant_ids, min(5, len(restaurant_ids)))
+    for hit in hits:
+        buisinessIds.append(str(hit['_source']['id']))
+    
+    ids = random.sample(buisinessIds, 3)
+    print(ids)
+    return ids
 
 # Function to get restaurant data from DynamoDB
-def get_dynamo_data(table, key):
+def get_dynamo_data(index):
+    aws_access_key_id=''
+    aws_secret_access_key=''
+    dynamodb = boto3.resource('dynamodb',aws_access_key_id=aws_access_key_id,aws_secret_access_key=aws_secret_access_key,region_name='us-east-1')
+    table = dynamodb.Table('yelp-restaurants')
+    results = [] 
     try:
-        response = table.get_item(Key={'id': key})
-        if 'Item' in response:
-            name = response['Item']['name']
-            address_list = response['Item']['address']
-            return f"{name}, {address_list}"
-        else:
-            return "Restaurant data not found"
+        for id in index:
+            print("Restaurant id  ",id)
+            response = table.get_item(Key={'id': id})
+            print("response",response)
+            if 'Item' in response:
+                name = response['Item']['name']
+                address_list = response['Item']['address']
+                contact = response['Item']['contact']
+                rating = response['Item']['rating']
+                print(f"{name}, {address_list}, {contact}, Rating {rating}")
+                result = f"{name}, {address_list} , {contact} ,Rating {rating}"
+                results.append(result)
+        return results
     except ClientError as e:
         logger.error(f"Error fetching data from DynamoDB: {e}")
         return "Error fetching restaurant data"
@@ -97,7 +109,7 @@ def send_email(recipient_email, subject, body):
     ses = boto3.client('ses', region_name='us-east-1')
     try:
         response = ses.send_email(
-            Source='',
+            Source='sp8049@nyu.edu',
             Destination={'ToAddresses': [recipient_email]},
             Message={
                 'Subject': {'Data': subject},
@@ -112,9 +124,11 @@ def send_email(recipient_email, subject, body):
 
 # Lambda handler function
 def lambda_handler(event, context):
+    logger.debug(f"Received event: {json.dumps(event)}")
+    
     sqs_url = 'https://sqs.us-east-1.amazonaws.com/825765404944/dining'
     es_host = 'search-diningopensearch-ct3nznfv55eeyexbdclrio5poq.us-east-1.es.amazonaws.com'
-    table_name = 'yelp-restaurants'
+    
     
     # Get SQS messages
     messages = get_sqs_data(sqs_url)
@@ -124,32 +138,26 @@ def lambda_handler(event, context):
         logger.debug("No SQS messages to process")
         return
     
-    dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
-    table = dynamodb.Table(table_name)
+    
     
     for message in messages:
         # logger.debug(message);
         message_body = json.loads(message['Body'])
         cuisine = message_body.get('Cuisine', 'unknown cuisine')
         recipient_email = message_body.get('Email', '')
-        
+        print("cuisine = ",cuisine)
         # Elasticsearch query
-        query = {"query": {"match": {"cuisine": cuisine}}}
-        es_search_result = es_search(es_host, query)
-        number_of_records_found = int(es_search_result.get("hits", {}).get("total", {}).get("value", 0))
-        hits = es_search_result.get('hits', {}).get('hits', [])
+        index=es_search(es_host,cuisine)
         
-        suggested_restaurants = []
-        for hit in hits:
-            restaurant_id = hit['_source']['id']
-            suggested_restaurant = get_dynamo_data(table, restaurant_id)
-            suggested_restaurants.append(suggested_restaurant)
+        
+        suggested_restaurants = get_dynamo_data(index)
+           
 
         # Prepare the email content
         dining_time = message_body.get('DiningTime', 'unknown time')
         num_people = message_body.get('NumberOfPeople', 'unknown number')
         email_content = f"Hello! Here are {cuisine} suggestions for {num_people} people at {dining_time}:\n"
-        
+        print("suggested_restaurants ",suggested_restaurants)
         for i, rest in enumerate(suggested_restaurants):
             email_content += f"({i+1}) {rest}\n"
         
@@ -166,4 +174,3 @@ def lambda_handler(event, context):
         'statusCode': 200,
         'body': json.dumps('Execution completed')
     }
-s
